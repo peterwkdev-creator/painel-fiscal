@@ -13,6 +13,7 @@ import json
 import unittest
 from pathlib import Path
 
+from fiscal.cli import classificar_receita
 from fiscal.siconfi import (
     COD_RECEITAS_CORRENTES,
     COD_RECEITAS_DETALHE,
@@ -299,6 +300,55 @@ class TestOBlocoIntraOrcamentarioNaoPodeVazar(unittest.TestCase):
         # A prova de que a correção é a certa: com o bloco intra fora, a
         # régua da própria fonte aprova.
         self.assertIs(self.ler_intra().fecha, True)
+
+
+class TestDeclaracaoIncompletaQueAReguaAprova(unittest.TestCase):
+    """A quarta armadilha, e a única que a fonte não pode denunciar sozinha.
+
+    Apiaí/SP declarou R$ 5,06 mi de receita corrente sem nenhuma transferência,
+    e a soma das componentes FECHAVA com o total declarado. O site publicou
+    *"79,0% de impostos"* sobre um município que recebe FPM como todos.
+
+    A régua de fechamento não pode ver isso por construção: ela compara a
+    declaração consigo mesma. Quem vê é uma segunda fonte (a RCL do RGF, que
+    dizia R$ 134 mi) ou um fato legal (o FPM é constitucional).
+    """
+
+    def test_sem_transferencia_e_incompleta_mesmo_fechando(self):
+        # O caso real, com os números reais: a declaração fecha e é falsa.
+        r = Receita(3502705, 2024, 6, 5062526.0, {
+            "IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA": 4001229.0,
+            "CONTRIBUIÇÕES": 1061297.0})
+        self.assertIs(r.fecha, True, "a régua da fonte APROVA")
+        self.assertEqual(classificar_receita(r.total, None, 134180280.0),
+                         "sem transferência corrente")
+
+    def test_transferencia_zero_tambem(self):
+        self.assertEqual(classificar_receita(100.0, 0.0, 100.0),
+                         "sem transferência corrente")
+
+    def test_sem_transferencia_vence_a_razao(self):
+        # É certeza, não suspeita: o motivo certo tem de aparecer mesmo quando
+        # a razão também estaria fora da faixa.
+        self.assertEqual(classificar_receita(5.0, None, 134.0),
+                         "sem transferência corrente")
+
+    def test_razao_fora_da_faixa_nomeia_o_lado(self):
+        self.assertEqual(classificar_receita(40.0, 30.0, 100.0),
+                         "receita muito abaixo da RCL")
+        self.assertEqual(classificar_receita(300.0, 200.0, 100.0),
+                         "RCL muito abaixo da receita")
+
+    def test_municipio_normal_passa(self):
+        # Mediana medida: razão 1,000. Imperatriz, da fixture, dentro da faixa.
+        self.assertIsNone(classificar_receita(
+            CORPUS["_receitas_correntes"], CORPUS["_transferencias"],
+            CORPUS["_receitas_correntes"] * 0.98))
+
+    def test_sem_rcl_nao_acusa(self):
+        # Sem a segunda fonte, a razão não existe — ausência de régua não é
+        # reprovação, pela mesma regra do `fecha` sem total.
+        self.assertIsNone(classificar_receita(100.0, 80.0, None))
 
 
 if __name__ == "__main__":

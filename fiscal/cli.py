@@ -647,6 +647,100 @@ def _bloco_funcoes(con) -> dict | None:
     }
 
 
+#: A faixa em que a receita corrente (RREO) e a RCL (RGF) do MESMO município
+#: descrevem o mesmo caixa.
+#:
+#: Medida em 22/09/2026 sobre 3.240 entes que entregaram os dois relatórios:
+#: mediana **1,000**, p5 1,00, p95 1,13. São duas declarações independentes, a
+#: RCL é a receita corrente menos deduções, e na prática elas batem. Fora de
+#: 0,5–2,0 uma das duas não descreve o município — com folga de quase 2× sobre
+#: o p95, para a faixa não acusar o normal.
+RAZAO_RC_RCL = (0.5, 2.0)
+
+
+def classificar_receita(total: float | None, transferencias: float | None,
+                        rcl: float | None) -> str | None:
+    """`None` se a declaração é plausível; senão, o motivo — nomeando o lado.
+
+    A ordem importa. **Sem transferência corrente é certeza**, não suspeita: o
+    FPM é repasse constitucional (CF art. 159) e nenhum município recebe zero.
+    Achado em Apiaí/SP, que declarou R$ 5 mi — R$ 204 por habitante contra
+    R$ 3.217 no percentil 1 — e cuja soma FECHAVA com o total declarado.
+    A régua de fechamento aprova declaração incompleta e coerente.
+
+    As outras duas são suspeitas **sem lado certo**: a razão diz que um dos
+    dois relatórios está errado, não qual. No lado alto aparecem Guaratinga e
+    Paripueira, cujo RGF já é sabidamente quebrado — ali o suspeito é a RCL.
+    """
+    if not transferencias:
+        return "sem transferência corrente"
+    if total and rcl and rcl > 0:
+        razao = total / rcl
+        if razao < RAZAO_RC_RCL[0]:
+            return "receita muito abaixo da RCL"
+        if razao > RAZAO_RC_RCL[1]:
+            return "RCL muito abaixo da receita"
+    return None
+
+
+def cmd_conferir_receita(args, *_) -> int:
+    """Cruza a receita (RREO) com a RCL (RGF) e RELATA o que não descreve o caixa.
+
+    Existe porque a régua da própria fonte — a soma das componentes contra o
+    total declarado — **não alcança declaração incompleta**: se o município
+    omite as transferências do anexo e também do total, a conta fecha. Só uma
+    segunda fonte, independente, mostra que falta dinheiro.
+
+    Não corrige nada, como o `conferir`: o site exibe o declarado e marca.
+    """
+    ex = args.exercicio
+    with armazem.abrir(args.banco) as con:
+        pe = con.execute(
+            "SELECT MAX(periodo) FROM receita_consulta WHERE exercicio=?",
+            (ex,)).fetchone()[0]
+        if pe is None:
+            print(f"Nenhuma receita coletada em {ex}.")
+            return 0
+        linhas = con.execute("""
+            SELECT e.codigo_ibge, e.nome, e.uf, r.total_declarado,
+                   (SELECT valor FROM receita t WHERE t.codigo_ibge=e.codigo_ibge
+                      AND t.exercicio=? AND t.periodo=? AND t.conta=?) transf,
+                   (SELECT rcl FROM pessoal p WHERE p.codigo_ibge=e.codigo_ibge
+                      AND p.exercicio=? ORDER BY p.periodo DESC LIMIT 1) rcl
+              FROM (SELECT DISTINCT codigo_ibge, total_declarado FROM receita
+                     WHERE exercicio=? AND periodo=?) r
+              JOIN ente e USING (codigo_ibge)
+             ORDER BY e.uf, e.nome""",
+            (ex, pe, "TRANSFERÊNCIAS CORRENTES", ex, ex, pe)).fetchall()
+
+    razoes = sorted(l["total_declarado"] / l["rcl"] for l in linhas
+                    if l["total_declarado"] and l["rcl"] and l["rcl"] > 0)
+    print(f"{len(linhas)} municípios com receita em {ex}/{pe} (bimestre); "
+          f"{len(razoes)} com RCL no RGF do mesmo ano.")
+    if razoes:
+        m = razoes[len(razoes) // 2]
+        print(f"  razão receita/RCL: mediana {_br(m, 3)} "
+              f"(faixa aceita {_br(RAZAO_RC_RCL[0], 1)}–{_br(RAZAO_RC_RCL[1], 1)})")
+
+    achados: dict[str, list] = {}
+    for l in linhas:
+        motivo = classificar_receita(l["total_declarado"], l["transf"], l["rcl"])
+        if motivo:
+            achados.setdefault(motivo, []).append(l)
+    if not achados:
+        print("\nNenhuma declaração fora do plausível.")
+        return 0
+    for motivo, ls in achados.items():
+        print(f"\n{motivo}: {len(ls)}")
+        for l in ls[:args.limite]:
+            r = (l["total_declarado"] / l["rcl"]) if l["rcl"] else None
+            print(f"   {l['nome']}/{l['uf']:<3} receita R$ {_br(l['total_declarado'], 0)}"
+                  f"  RCL R$ {_br(l['rcl'], 0)}  razão {_br(r, 2)}")
+        if len(ls) > args.limite:
+            print(f"   ... e mais {len(ls) - args.limite}")
+    return 0
+
+
 def _receitas_de(con, ex: int, pe: int, indice: dict[str, int],
                 indice_detalhe: dict[str, int]) -> dict[str, list]:
     """As linhas de um exercício como `[total, [[i, valor]], [[j, valor]]]`.
@@ -959,6 +1053,14 @@ def montar() -> argparse.ArgumentParser:
             s.add_argument("--acima-do-limite", action="store_true")
             s.add_argument("--limite", type=int, default=30)
 
+    # O cruzamento receita x RCL atravessa DOIS relatorios de escalas diferentes
+    # (RREO bimestral, RGF quadrimestral), entao `--periodo` nao cabe: cada lado
+    # usa o ultimo periodo coletado daquele exercicio.
+    s = sub.add_parser("conferir-receita",
+                       help="cruza a receita (RREO) com a RCL (RGF)")
+    s.add_argument("--exercicio", type=int, default=2024)
+    s.add_argument("--limite", type=int, default=15)
+
     # O SIOPS nao tem exercicio nem periodo: uma requisicao por UF traz os 26
     # anos. Por isso ele NAO entra no laco acima -- herdar `--exercicio` daria
     # uma bandeira que nao faz nada, que e pior que nao ter bandeira.
@@ -986,6 +1088,7 @@ def principal(argv=None, transporte: Transporte | None = None,
           "conferir": cmd_conferir, "exportar": cmd_exportar,
           "ingerir-funcoes": cmd_ingerir_funcoes, "funcoes": cmd_funcoes,
           "ingerir-receita": cmd_ingerir_receita,
+          "conferir-receita": cmd_conferir_receita,
           "ingerir-saude": cmd_ingerir_saude, "saude": cmd_saude}[args.comando]
     try:
         return fn(args, t, dormir)
