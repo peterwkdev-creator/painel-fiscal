@@ -15,7 +15,8 @@ import time
 
 from . import armazem, siops
 from .siconfi import (
-    NORDESTE, PAUSA_PADRAO, Dormir, ErroSiconfi, Transporte,
+    NORDESTE, PAUSA_PADRAO, RECEITAS_CORRENTES, RECEITAS_DETALHE,
+    Dormir, ErroSiconfi, Transporte,
     entes, funcoes, pessoal, receita, transporte_http,
 )
 
@@ -646,6 +647,132 @@ def _bloco_funcoes(con) -> dict | None:
     }
 
 
+def _receitas_de(con, ex: int, pe: int, indice: dict[str, int],
+                indice_detalhe: dict[str, int]) -> dict[str, list]:
+    """As linhas de um exercício como `[total, [[i, valor]], [[j, valor]]]`.
+
+    **Os dois arrays são separados de propósito, e é a única coisa que importa
+    nesta função.** O detalhe (`Impostos`, `Taxas`, as duas transferências por
+    origem) está DENTRO das componentes que somam: num array só, quem consome
+    somaria tudo e contaria o mesmo dinheiro duas vezes -- com o número bem
+    formado, que é o que torna o defeito invisível.
+
+    Separando, a soma errada deixa de ser possível por descuido: ela passa a
+    exigir concatenar duas listas de propósito.
+    """
+    saida: dict[str, list] = {}
+    for r in con.execute(
+        "SELECT codigo_ibge, conta, valor, total_declarado FROM receita"
+        " WHERE exercicio=? AND periodo=? AND valor IS NOT NULL"
+        " ORDER BY codigo_ibge, valor DESC", (ex, pe)):
+        # Centavos num orçamento municipal são ruído, e o total é arredondado
+        # do mesmo jeito para que a soma continue fechando contra ele.
+        entrada = saida.setdefault(
+            str(r["codigo_ibge"]),
+            [None if r["total_declarado"] is None
+             else round(r["total_declarado"]), [], []])
+        conta = r["conta"]
+        if conta in indice:
+            entrada[1].append([indice[conta], round(r["valor"])])
+        elif conta in indice_detalhe:
+            entrada[2].append([indice_detalhe[conta], round(r["valor"])])
+    return saida
+
+
+def _cobertura_receita(con, ex: int, pe: int) -> dict:
+    r = con.execute(
+        "SELECT COUNT(*) t, SUM(publicou) p,"
+        "       SUM(CASE WHEN fecha=0 THEN 1 ELSE 0 END) nf"
+        "  FROM receita_consulta WHERE exercicio=? AND periodo=?",
+        (ex, pe)).fetchone()
+    return {"consultados": r["t"], "publicaram": r["p"] or 0,
+            "naoFecham": r["nf"] or 0}
+
+
+def _bloco_receita(con) -> dict | None:
+    """A composição da receita corrente (RREO Anexo 01) — *de onde vem*.
+
+    Gêmeo de `_bloco_funcoes`, que responde *para onde vai*, e com as mesmas
+    duas regras: o período vem do último coletado (nunca de `--periodo`, que no
+    RGF significa quadrimestre) e **só exercícios completos entram**, para a
+    página não desenhar como ausência do município o que é ausência de coleta.
+
+    ## Por que o detalhe viaja em array próprio
+
+    As oito componentes de `rotulos` somam as receitas correntes e fecham com o
+    total declarado. As quatro de `rotulosDetalhe` estão **dentro** delas. Num
+    array único bastaria um `reduce` distraído para inflar a receita de um
+    município em 20% sem nada estourar.
+
+    `paiDoDetalhe` diz qual componente contém cada detalhe, alinhado a
+    `rotulosDetalhe`. É o que permite à página mostrar "dos R$ 147 mi de
+    transferências, R$ 101 mi vieram da União" sem inferir hierarquia por nome.
+    """
+    ultimo = con.execute(
+        "SELECT exercicio, periodo FROM receita_consulta"
+        " ORDER BY exercicio DESC, periodo DESC LIMIT 1").fetchone()
+    if ultimo is None:
+        return None
+    pe = ultimo["periodo"]
+
+    universo = con.execute("SELECT COUNT(*) FROM ente").fetchone()[0]
+    anos = [r["exercicio"] for r in con.execute(
+        "SELECT exercicio FROM receita_consulta WHERE periodo = ?"
+        " GROUP BY exercicio HAVING COUNT(DISTINCT codigo_ibge) >= ?"
+        " ORDER BY exercicio DESC", (pe, universo))]
+    if not anos:
+        return None
+
+    # Os rótulos saem da UNIÃO dos exercícios, ordenados pelo peso no mais
+    # recente -- mesma regra das funções, e pelo mesmo motivo: uma componente
+    # que só aparece num ano antigo precisa de índice, senão a linha dela some
+    # em silêncio. RECEITA INDUSTRIAL existe em 16 dos 3.243 entes.
+    marcas = ",".join("?" for _ in anos)
+    pesos = {r[0]: r[1] for r in con.execute(
+        "SELECT conta, SUM(CASE WHEN exercicio=? THEN valor ELSE 0 END) peso"
+        "  FROM receita"
+        f" WHERE exercicio IN ({marcas}) AND periodo = ? AND valor IS NOT NULL"
+        " GROUP BY conta", [anos[0], *anos, pe])}
+    ordenar = lambda nomes: sorted(
+        [n for n in nomes if n in pesos], key=lambda n: (-pesos[n], n))
+    rotulos = ordenar(RECEITAS_CORRENTES)
+    rotulos_detalhe = ordenar(RECEITAS_DETALHE)
+    indice = {nome: i for i, nome in enumerate(rotulos)}
+    indice_detalhe = {nome: i for i, nome in enumerate(rotulos_detalhe)}
+
+    # A hierarquia é declarada no leitor, não adivinhada aqui: `Impostos` e
+    # `Taxas` estão em IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA; as duas
+    # transferências por origem estão em TRANSFERÊNCIAS CORRENTES.
+    PAI = {
+        "Impostos": "IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA",
+        "Taxas": "IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA",
+        "Transferências da União e de suas Entidades": "TRANSFERÊNCIAS CORRENTES",
+        "Transferências dos Estados e do Distrito Federal e de suas Entidades":
+            "TRANSFERÊNCIAS CORRENTES",
+    }
+    return {
+        "periodo": pe,
+        "fonte": armazem.FONTE_RECEITA,
+        "rotulos": rotulos,
+        "rotulosDetalhe": rotulos_detalhe,
+        # `null` quando o pai daquele detalhe não existe neste corpus -- não se
+        # inventa índice para componente que ninguém publicou.
+        "paiDoDetalhe": [indice.get(PAI[n]) for n in rotulos_detalhe],
+        "colunasMunicipio": ["total", "valores", "detalhe"],
+        "exercicios": [
+            {
+                "exercicio": ex,
+                "coletadoEm": con.execute(
+                    "SELECT MAX(coletado_em) FROM receita_consulta"
+                    " WHERE exercicio=? AND periodo=?", (ex, pe)).fetchone()[0],
+                "cobertura": _cobertura_receita(con, ex, pe),
+                "porMunicipio": _receitas_de(con, ex, pe, indice, indice_detalhe),
+            }
+            for ex in anos
+        ],
+    }
+
+
 def cmd_exportar(args, *_) -> int:
     """Gera o snapshot que o painel lê no build.
 
@@ -685,6 +812,7 @@ def cmd_exportar(args, *_) -> int:
                 [r["exercicio"], r["periodo"], bool(r["publicou"]), r["percentual"]])
         bloco_funcoes = _bloco_funcoes(con)
         bloco_saude = _bloco_saude(con)
+        bloco_receita = _bloco_receita(con)
 
     consultados = sum(1 for l in linhas if l["publicou"] is not None)
     publicaram = sum(1 for l in linhas if l["publicou"] == 1)
@@ -739,6 +867,9 @@ def cmd_exportar(args, *_) -> int:
         # Mesma regra da chave acima: existe sempre, `null` enquanto o
         # `ingerir-saude` não tiver rodado.
         "saude": bloco_saude,
+        # A outra metade da pergunta: `funcoes` diz para onde vai o dinheiro,
+        # esta diz de onde ele vem. Mesma regra das duas chaves acima.
+        "receita": bloco_receita,
     }
     destino = Path(args.saida)
     destino.parent.mkdir(parents=True, exist_ok=True)
@@ -765,6 +896,18 @@ def cmd_exportar(args, *_) -> int:
               f"{len(sa['cobertura'])} UFs varridas.")
     else:
         print("  sem aplicação em saúde: rode `ingerir-saude`.")
+    if snapshot["receita"]:
+        rc = snapshot["receita"]
+        print(f"  composição da receita, {len(rc['rotulos'])} componentes "
+              f"(+{len(rc['rotulosDetalhe'])} de detalhe, NÃO somáveis), "
+              f"{len(rc['exercicios'])} exercício(s) no {rc['periodo']}º bimestre:")
+        for e in rc["exercicios"]:
+            c = e["cobertura"]
+            print(f"    {e['exercicio']}/{rc['periodo']}: "
+                  f"{len(e['porMunicipio'])} municípios, "
+                  f"{c['naoFecham']} com soma que não fecha.")
+    else:
+        print("  sem composição da receita: rode `ingerir-receita`.")
     return 0
 
 

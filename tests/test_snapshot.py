@@ -18,8 +18,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fiscal.armazem import abrir, gravar_entes, gravar_funcoes, gravar_pessoal
-from fiscal.siconfi import Ente, Funcoes, Pessoal
+from fiscal.armazem import (
+    abrir, gravar_entes, gravar_funcoes, gravar_pessoal, gravar_receita,
+)
+from fiscal.siconfi import (
+    RECEITAS_CORRENTES, RECEITAS_DETALHE, Ente, Funcoes, Pessoal, Receita,
+)
 
 RAIZ = Path(__file__).resolve().parent.parent
 DADOS_TS = RAIZ / "painel" / "lib" / "dados.ts"
@@ -59,6 +63,20 @@ class ContratoEntreLinguagens(unittest.TestCase):
             gravar_pessoal(con, 2507507, 2024, 3, Pessoal(
                 2507507, 2024, 3, 1e9, 9.8e8, 5.2e8, 52.69, 51.3))
             gravar_pessoal(con, 2111300, 2024, 3, None)   # não publicou
+            # A receita dos TRÊS entes, porque o bloco só sai com o exercício
+            # completo — varrido pela metade, ele é `None` de propósito.
+            gravar_receita(con, 2927408, 2024, 6, Receita(
+                2927408, 2024, 6, 12_000.0, {
+                    "TRANSFERÊNCIAS CORRENTES": 9_000.0,
+                    "IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA": 3_000.0,
+                    # O detalhe, que está DENTRO das duas de cima.
+                    "Transferências da União e de suas Entidades": 7_000.0,
+                    "Impostos": 2_800.0,
+                    "Taxas": 200.0,
+                }))
+            gravar_receita(con, 2507507, 2024, 6, Receita(
+                2507507, 2024, 6, 500.0, {"TRANSFERÊNCIAS CORRENTES": 500.0}))
+            gravar_receita(con, 2111300, 2024, 6, None)   # não publicou
         subprocess.run(
             [sys.executable, "-m", "fiscal", "--banco", banco, "exportar",
              "--exercicio", "2024", "--periodo", "3", "--saida", str(saida)],
@@ -372,6 +390,124 @@ class ComparacaoEntreAnos(unittest.TestCase):
             f = json.loads(saida.read_text(encoding="utf-8"))["funcoes"]
         self.assertEqual(len(f["exercicios"]), 1, "não há 2023/6 para comparar")
         self.assertEqual(f["exercicios"][0]["exercicio"], 2024)
+
+
+class OBlocoDeReceitaNaoPodeSerSOMAVELPorDescuido(unittest.TestCase):
+    """O contrato que vale mais que o formato, escrito em 22/09/2026.
+
+    A composição da receita tem duas listas de linhas, e uma está DENTRO da
+    outra: `Impostos` e `Taxas` cabem em IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE
+    MELHORIA, e as transferências por origem cabem em TRANSFERÊNCIAS CORRENTES.
+
+    Num array único, `valores.reduce((a, [, v]) => a + v, 0)` — a coisa mais
+    natural de se escrever numa página — infla a receita do município em ~20%.
+    Número bem formado, página plausível, valor errado: o defeito que esta
+    fonte já produziu três vezes de outras maneiras.
+
+    Por isso `detalhe` é a **terceira** posição da tupla, e não mais itens da
+    segunda. Somar os dois passa a exigir concatená-los de propósito.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rc = ContratoEntreLinguagens.snapshot["receita"]
+        cls.ts = ContratoEntreLinguagens.ts
+
+    def test_o_bloco_existe(self):
+        self.assertIsNotNone(self.rc, "o corpus de teste grava receita")
+
+    def test_a_tupla_do_municipio_bate_com_o_typescript(self):
+        self.assertEqual(self.rc["colunasMunicipio"],
+                         rotulos_da_tupla(self.ts, "EntradaReceita"))
+
+    def test_o_detalhe_vem_em_posicao_PROPRIA(self):
+        i = self.rc["colunasMunicipio"].index("detalhe")
+        j = self.rc["colunasMunicipio"].index("valores")
+        self.assertNotEqual(i, j)
+        for entrada in self.rc["exercicios"][0]["porMunicipio"].values():
+            self.assertEqual(len(entrada), 3)
+
+    def test_as_duas_listas_de_rotulos_nao_se_cruzam(self):
+        self.assertFalse(set(self.rc["rotulos"]) & set(self.rc["rotulosDetalhe"]))
+
+    def confere_indices(self, posicao, rotulos, permitidos):
+        """Índice fora da faixa é o sintoma de lista trocada — e um `IndexError`
+        cru reprova sem dizer o quê. Aqui ele vira frase."""
+        for cod, entrada in self.rc["exercicios"][0]["porMunicipio"].items():
+            for i, _ in entrada[posicao]:
+                self.assertLess(i, len(rotulos),
+                                f"{cod}: índice {i} fora de {len(rotulos)} "
+                                f"rótulos — lista errada nesta posição")
+                self.assertIn(rotulos[i], permitidos, f"em {cod}")
+
+    def test_so_as_componentes_que_somam_estao_em_valores(self):
+        self.confere_indices(1, self.rc["rotulos"], RECEITAS_CORRENTES)
+
+    def test_e_so_o_detalhe_esta_em_detalhe(self):
+        self.confere_indices(2, self.rc["rotulosDetalhe"], RECEITAS_DETALHE)
+
+    def test_a_soma_de_valores_FECHA_com_o_total(self):
+        """A régua da fonte, atravessando o exportador.
+
+        **A tolerância é derivada, não escolhida.** Cada componente é
+        arredendada para o real inteiro, então a soma de `n` delas pode
+        afastar-se do total em até `n/2`. Um `delta=1` fixo passaria aqui — a
+        fixture tem duas componentes — e seria violado pelo dado real: medido
+        em 22/09/2026 sobre os 3.243 municípios, 1.726 fecham exato, 1.432
+        erram 1 e **85 erram 2**.
+
+        Régua que só vale para o corpus de teste é régua que mente sobre o
+        corpus de verdade.
+        """
+        for cod, (total, valores, _) in self.rc["exercicios"][0]["porMunicipio"].items():
+            if total is None:
+                continue
+            self.assertAlmostEqual(
+                sum(v for _, v in valores), total, delta=len(valores) / 2 + 0.5,
+                msg=f"a soma de {cod} não fecha com o total declarado")
+
+    def test_somar_as_DUAS_listas_estouraria(self):
+        # O contrafactual, para o teste acima não passar por acaso: é
+        # exatamente o `reduce` distraído, e ele tem de dar errado.
+        total, valores, detalhe = \
+            self.rc["exercicios"][0]["porMunicipio"]["2927408"]
+        self.assertTrue(detalhe, "o corpus precisa de um com detalhe")
+        self.assertGreater(sum(v for _, v in valores + detalhe), total)
+
+    def test_o_pai_de_cada_detalhe_aponta_para_a_componente_certa(self):
+        pais = self.rc["paiDoDetalhe"]
+        self.assertEqual(len(pais), len(self.rc["rotulosDetalhe"]))
+        esperado = {
+            "Impostos": "IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA",
+            "Taxas": "IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA",
+            "Transferências da União e de suas Entidades":
+                "TRANSFERÊNCIAS CORRENTES",
+            "Transferências dos Estados e do Distrito Federal e de suas Entidades":
+                "TRANSFERÊNCIAS CORRENTES",
+        }
+        for nome, pai in zip(self.rc["rotulosDetalhe"], pais):
+            if pai is not None:
+                self.assertEqual(self.rc["rotulos"][pai], esperado[nome])
+
+    def test_exercicio_varrido_pela_metade_nao_entra(self):
+        # Mesma regra do bloco de funções: um ano incompleto separaria os
+        # municípios em "não entregou" e "ainda não perguntamos", e a página
+        # diria a primeira coisa sobre quem é a segunda.
+        with tempfile.TemporaryDirectory() as d:
+            banco = str(Path(d) / "meio.db")
+            saida = Path(d) / "s.json"
+            with abrir(banco) as con:
+                gravar_entes(con, [
+                    Ente(2927408, "Salvador", "BA", "NE", "M", 1, "1"),
+                    Ente(2507507, "João Pessoa", "PB", "NE", "M", 2, "2")])
+                gravar_receita(con, 2927408, 2024, 6, Receita(
+                    2927408, 2024, 6, 10.0, {"TRANSFERÊNCIAS CORRENTES": 10.0}))
+            subprocess.run(
+                [sys.executable, "-m", "fiscal", "--banco", banco, "exportar",
+                 "--exercicio", "2024", "--periodo", "3", "--saida", str(saida)],
+                cwd=RAIZ, check=True, capture_output=True)
+            self.assertIsNone(
+                json.loads(saida.read_text(encoding="utf-8"))["receita"])
 
 
 if __name__ == "__main__":

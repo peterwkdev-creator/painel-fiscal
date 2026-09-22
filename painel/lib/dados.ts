@@ -77,7 +77,75 @@ export interface Snapshot {
    * é o que o teste de contrato do lado Python compara.
    */
   saude: Saude | null;
+  /**
+   * A composição da receita corrente (RREO Anexo 01) — *de onde vem* o
+   * dinheiro, enquanto `funcoes` diz *para onde vai*.
+   *
+   * `null` enquanto o `ingerir-receita` não tiver rodado. A chave existe
+   * sempre — é o que o teste de contrato do lado Python compara.
+   */
+  receita: Receita | null;
 }
+
+/**
+ * De onde vem a receita corrente de um município.
+ *
+ * O município brasileiro mediano arrecada perto de **7%** do que gasta; o
+ * resto é transferência. Este bloco é o que torna esse fato visível por
+ * município, e não como média nacional.
+ *
+ * ## `valores` e `detalhe` são listas separadas, e isso é o contrato
+ *
+ * `rotulos` são as oito componentes que **somam** as receitas correntes e
+ * fecham com o total declarado pela própria fonte. `rotulosDetalhe` são
+ * quatro linhas que estão **dentro** daquelas — `Impostos` e `Taxas` dentro
+ * de IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA, e as duas transferências
+ * por origem dentro de TRANSFERÊNCIAS CORRENTES.
+ *
+ * Num array único, um `reduce` distraído infla a receita do município em
+ * ~20% sem nada estourar — número bem formado, página plausível, valor
+ * errado. Por isso viajam separados: somar os dois exige concatená-los de
+ * propósito.
+ */
+export interface Receita {
+  /** **Bimestre** (1..6), não quadrimestre — o RREO não usa a escala do RGF. */
+  periodo: number;
+  fonte: string;
+  /** As componentes que somam, ordenadas pelo peso no exercício mais recente. */
+  rotulos: string[];
+  /** Linhas contidas nas de cima. **Nunca entram na soma.** */
+  rotulosDetalhe: string[];
+  /**
+   * Alinhado a `rotulosDetalhe`: o índice em `rotulos` da componente que
+   * contém cada detalhe, ou `null` se aquela componente não existe no corpus.
+   * É o que permite dizer "dos R$ 147 mi de transferências, R$ 101 mi vieram
+   * da União" sem inferir hierarquia pelo nome.
+   */
+  paiDoDetalhe: (number | null)[];
+  /** Ordem dos campos de cada entrada de `porMunicipio`. */
+  colunasMunicipio: string[];
+  /** Do mais recente para o mais antigo. Só exercícios varridos por inteiro. */
+  exercicios: ExercicioReceita[];
+}
+
+export interface ExercicioReceita {
+  exercicio: number;
+  coletadoEm: string | null;
+  /**
+   * `naoFecham` é a régua da própria fonte: a soma das componentes contra o
+   * total que o ente declarou. Em 2024/6 ela apontou 15 municípios e os 15
+   * eram defeito do leitor, não do dado.
+   */
+  cobertura: { consultados: number; publicaram: number; naoFecham: number };
+  /** Por código IBGE. Valores em reais inteiros. */
+  porMunicipio: Record<string, EntradaReceita>;
+}
+
+export type EntradaReceita = [
+  total: number | null,
+  valores: [indice: number, valor: number][],
+  detalhe: [indice: number, valor: number][],
+];
 
 /**
  * A aplicação em saúde: 2000 a 2025, do SIOPS pelo TabNet do DATASUS.
