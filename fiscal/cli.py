@@ -867,6 +867,30 @@ def _bloco_receita(con) -> dict | None:
     }
 
 
+#: As chaves que mudam a cada execução sem que o DADO mude.
+CARIMBOS = frozenset({"geradoEm", "coletadoEm"})
+
+
+def _sem_carimbos(x):
+    """O snapshot sem relógio, para comparar dado com dado.
+
+    **Por NOME da chave, em qualquer profundidade** — e não por caminho, como no
+    `observatorio`. Aqui os carimbos moram em blocos diferentes (`funcoes`,
+    `saude`, `receita`, cada um com seu `coletadoEm`), e uma lista de caminhos
+    seria a lista copiada do `stack.md` (3d): o próximo bloco que nascer com
+    carimbo escaparia dela, e a trava deixaria passar o diff de relógio dele.
+
+    Uma nova coleta com o mesmo dado também não reescreve — o `coletadoEm`
+    mudaria sozinho. É o comportamento certo: a coleta está no banco e no log,
+    e o site não precisa republicar um número que não mudou.
+    """
+    if isinstance(x, dict):
+        return {k: _sem_carimbos(v) for k, v in x.items() if k not in CARIMBOS}
+    if isinstance(x, list):
+        return [_sem_carimbos(v) for v in x]
+    return x
+
+
 def cmd_exportar(args, *_) -> int:
     """Gera o snapshot que o painel lê no build.
 
@@ -967,6 +991,25 @@ def cmd_exportar(args, *_) -> int:
     }
     destino = Path(args.saida)
     destino.parent.mkdir(parents=True, exist_ok=True)
+
+    # A trava do CARIMBO, a mesma do `observatorio` (21/09/2026) e pelo mesmo
+    # motivo: uma exportação sem dado novo reescrevia o arquivo só com o
+    # `geradoEm` trocado. Achado numa revisão em 22/09, com um `snapshot.json`
+    # sujo que diferia do versionado em UMA chave. O `atualizar-painel.py` o
+    # copia para o site, e lá um diff de relógio é um commit, um deploy e ~1 GB
+    # de Deployment Storage republicando o mesmo dado.
+    velho = None
+    if destino.exists():
+        try:
+            velho = json.loads(destino.read_text(encoding="utf-8"))
+        except ValueError:
+            velho = None  # arquivo quebrado: reescrever é o conserto
+    if velho is not None and _sem_carimbos(velho) == _sem_carimbos(snapshot):
+        print(f"{destino} · NADA MUDOU no dado — arquivo intacto.")
+        print("  Só os carimbos seriam diferentes, e reescrevê-los faria o "
+              "site\n  republicar o mesmo dado num deploy novo.")
+        return 0
+
     destino.write_text(json.dumps(snapshot, ensure_ascii=False,
                                   separators=(",", ":")) + "\n", encoding="utf-8")
     kb = destino.stat().st_size // 1024

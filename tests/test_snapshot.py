@@ -510,5 +510,82 @@ class OBlocoDeReceitaNaoPodeSerSOMAVELPorDescuido(unittest.TestCase):
                 json.loads(saida.read_text(encoding="utf-8"))["receita"])
 
 
+class ATravaDoCarimbo(unittest.TestCase):
+    """Exportar sem dado novo NÃO reescreve o arquivo.
+
+    Achado numa revisão em 22/09/2026: o `snapshot.json` ficava sujo depois de
+    todo `atualizar-painel.py`, diferindo do versionado só no `geradoEm`. No
+    site, um diff de relógio é um commit e um deploy republicando o mesmo dado.
+
+    **A prova usa uma SENTINELA, e não a comparação de bytes.** Duas exportações
+    no mesmo segundo geram o mesmo `geradoEm`, então "os bytes não mudaram"
+    passaria com a trava desligada. Com um `geradoEm` falso gravado no arquivo,
+    ele só sobrevive à segunda exportação se ela não escreveu.
+    """
+
+    SENTINELA = "SENTINELA-NAO-REESCRITO"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.banco = str(Path(self.dir.name) / "t.db")
+        self.saida = Path(self.dir.name) / "s.json"
+        with abrir(self.banco) as con:
+            gravar_entes(con, [Ente(2927408, "Salvador", "BA", "NE", "M", 1, "1"),
+                               Ente(2507507, "João Pessoa", "PB", "NE", "M", 2, "2")])
+            gravar_pessoal(con, 2927408, 2024, 3, Pessoal(
+                2927408, 2024, 3, 1e10, 9.9e9, 3.3e9, 32.37, 51.3))
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def exportar(self):
+        r = subprocess.run(
+            [sys.executable, "-m", "fiscal", "--banco", self.banco, "exportar",
+             "--exercicio", "2024", "--periodo", "3", "--saida", str(self.saida)],
+            cwd=RAIZ, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def marcar(self):
+        d = json.loads(self.saida.read_text(encoding="utf-8"))
+        d["geradoEm"] = self.SENTINELA
+        self.saida.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+
+    def gerado(self):
+        return json.loads(self.saida.read_text(encoding="utf-8"))["geradoEm"]
+
+    def test_mesmo_dado_nao_reescreve(self):
+        self.exportar()
+        self.marcar()
+        saida = self.exportar()
+        self.assertEqual(self.gerado(), self.SENTINELA, "o arquivo foi reescrito")
+        self.assertIn("NADA MUDOU", saida)
+
+    def test_dado_novo_reescreve(self):
+        # O controle: sem ele, a trava sempre fechada também passaria acima.
+        self.exportar()
+        self.marcar()
+        with abrir(self.banco) as con:
+            gravar_pessoal(con, 2507507, 2024, 3, Pessoal(
+                2507507, 2024, 3, 1e9, 9.8e8, 5.2e8, 52.69, 51.3))
+        self.exportar()
+        self.assertNotEqual(self.gerado(), self.SENTINELA)
+
+    def test_arquivo_quebrado_e_reescrito(self):
+        self.saida.write_text("{nao e json", encoding="utf-8")
+        self.exportar()
+        json.loads(self.saida.read_text(encoding="utf-8"))  # levanta se nao for
+
+    def test_carimbo_aninhado_tambem_e_ignorado(self):
+        # Por nome e em qualquer profundidade: o `coletadoEm` de um exercício
+        # dentro de um bloco não pode fazer a trava achar que o dado mudou.
+        from fiscal.cli import _sem_carimbos
+        a = {"geradoEm": 1, "receita": {"exercicios": [{"coletadoEm": 1, "v": 5}]}}
+        b = {"geradoEm": 2, "receita": {"exercicios": [{"coletadoEm": 2, "v": 5}]}}
+        c = {"geradoEm": 2, "receita": {"exercicios": [{"coletadoEm": 2, "v": 6}]}}
+        self.assertEqual(_sem_carimbos(a), _sem_carimbos(b))
+        self.assertNotEqual(_sem_carimbos(a), _sem_carimbos(c))
+
+
 if __name__ == "__main__":
     unittest.main()
