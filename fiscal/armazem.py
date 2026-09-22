@@ -74,6 +74,43 @@ CREATE TABLE IF NOT EXISTS funcao_consulta (
     PRIMARY KEY (codigo_ibge, exercicio, periodo)
 );
 
+-- Composicao da RECEITA corrente (RREO Anexo 01). Mesmo desenho da
+-- `despesa_funcao`, e de proposito: sao os dois lados da mesma pergunta, e o
+-- que ja esta provado nao se reinventa.
+--
+-- `total_declarado` repete em todas as linhas do mesmo relatorio pela mesma
+-- razao de la: e a regua contra a qual a soma se confere, e guarda-la junto
+-- evita uma segunda consulta para verificar.
+--
+-- **Atencao ao somar.** Nem toda linha entra na soma: as quatro de DETALHE
+-- (Impostos, Taxas, Transferencias da Uniao, Transferencias dos Estados) estao
+-- DENTRO das oito componentes. Somar tudo conta o mesmo dinheiro duas vezes.
+-- Quem soma usa `siconfi.RECEITAS_CORRENTES`, que e a lista que fecha.
+CREATE TABLE IF NOT EXISTS receita (
+    codigo_ibge     INTEGER NOT NULL,
+    exercicio       INTEGER NOT NULL,
+    periodo         INTEGER NOT NULL,
+    conta           TEXT    NOT NULL,
+    valor           REAL,
+    total_declarado REAL,
+    fonte           TEXT NOT NULL,
+    coletado_em     TEXT NOT NULL,
+    PRIMARY KEY (codigo_ibge, exercicio, periodo, conta)
+);
+
+-- Quem foi consultado para receita, inclusive quem nao publicou -- mesma razao
+-- da `funcao_consulta`: sem isto a retomada pergunta de novo, para sempre, a
+-- todo municipio sem relatorio.
+CREATE TABLE IF NOT EXISTS receita_consulta (
+    codigo_ibge INTEGER NOT NULL,
+    exercicio   INTEGER NOT NULL,
+    periodo     INTEGER NOT NULL,
+    publicou    INTEGER NOT NULL,
+    fecha       INTEGER,
+    coletado_em TEXT NOT NULL,
+    PRIMARY KEY (codigo_ibge, exercicio, periodo)
+);
+
 -- Aplicacao em saude (SIOPS/DATASUS). Uma linha por municipio/exercicio/
 -- indicador. **A ausencia nao tem linha**: no SIOPS uma requisicao traz a UF
 -- inteira, entao ano sem valor e ausencia da FONTE, nao pergunta que faltou
@@ -118,6 +155,7 @@ CREATE TABLE IF NOT EXISTS coleta (
 
 FONTE = "SICONFI/Tesouro Nacional — RGF Anexo 01"
 FONTE_FUNCOES = "SICONFI/Tesouro Nacional — RREO Anexo 02"
+FONTE_RECEITA = "SICONFI/Tesouro Nacional — RREO Anexo 01"
 FONTE_SAUDE = "SIOPS/Ministério da Saúde — TabNet/DATASUS"
 
 
@@ -232,6 +270,39 @@ def gravar_funcoes(con: sqlite3.Connection, codigo_ibge: int, exercicio: int,
           FONTE_FUNCOES, agora_) for nome, valor in f.valores.items()])
 
 
+def gravar_receita(con: sqlite3.Connection, codigo_ibge: int, exercicio: int,
+                   periodo: int, r) -> None:
+    """Grava a composição da receita -- e grava também quando não houve nenhuma.
+
+    Gêmea de `gravar_funcoes`, e deliberadamente: são os dois lados da mesma
+    pergunta, vindos do mesmo relatório, com a mesma cobertura (medido em
+    21/09/2026: 20 de 20 entre quem publicou o Anexo 02, 0 de 20 entre quem
+    não publicou).
+
+    `r is None` significa "consultado, não publicou" -- sem registrar isso, a
+    retomada perguntaria de novo a cada execução a todo município sem relatório.
+    """
+    agora_ = agora()
+    con.execute(
+        "INSERT INTO receita_consulta (codigo_ibge, exercicio, periodo, publicou,"
+        " fecha, coletado_em) VALUES (?,?,?,?,?,?)"
+        " ON CONFLICT(codigo_ibge, exercicio, periodo) DO UPDATE SET"
+        "   publicou=excluded.publicou, fecha=excluded.fecha,"
+        "   coletado_em=excluded.coletado_em",
+        (codigo_ibge, exercicio, periodo, 1 if r else 0,
+         None if (r is None or r.fecha is None) else int(r.fecha), agora_))
+    if not r:
+        return
+    con.executemany(
+        "INSERT INTO receita (codigo_ibge, exercicio, periodo, conta,"
+        " valor, total_declarado, fonte, coletado_em) VALUES (?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(codigo_ibge, exercicio, periodo, conta) DO UPDATE SET"
+        "   valor=excluded.valor, total_declarado=excluded.total_declarado,"
+        "   fonte=excluded.fonte, coletado_em=excluded.coletado_em",
+        [(codigo_ibge, exercicio, periodo, conta, valor, r.total,
+          FONTE_RECEITA, agora_) for conta, valor in r.valores.items()])
+
+
 def gravar_saude(con: sqlite3.Connection, uf: str, indicador: str,
                  series, por6: dict, nomes_fora: int) -> dict:
     """Grava a série de saúde de uma UF, e devolve o que foi gravado.
@@ -283,4 +354,11 @@ def ja_consultados_funcoes(con: sqlite3.Connection, exercicio: int,
                            periodo: int) -> set[int]:
     return {r[0] for r in con.execute(
         "SELECT codigo_ibge FROM funcao_consulta WHERE exercicio=? AND periodo=?",
+        (exercicio, periodo))}
+
+
+def ja_consultados_receita(con: sqlite3.Connection, exercicio: int,
+                           periodo: int) -> set[int]:
+    return {r[0] for r in con.execute(
+        "SELECT codigo_ibge FROM receita_consulta WHERE exercicio=? AND periodo=?",
         (exercicio, periodo))}

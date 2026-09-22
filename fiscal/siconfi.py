@@ -365,6 +365,137 @@ class Funcoes:
         return abs(self.soma - self.total) <= max(1.0, abs(self.total) * 1e-9)
 
 
+# ── RECEITA: RREO Anexo 01 (Balanço Orçamentário) ──────────────────────────
+#
+# Sondado em 21/09/2026, 48 requisições antes de uma linha de código. O registro
+# está em `progress/painel-fiscal.md`; aqui fica o que o leitor precisa saber.
+#
+# A coluna é **"Até o Bimestre (c)"** — o realizado acumulado no ano, análoga à
+# liquidada da despesa. A "PREVISÃO ATUALIZADA (a)" é orçamento, não
+# arrecadação: confundi-las publicaria intenção como fato.
+#
+# O `rotulo` é sempre `Padrão` neste anexo — ao contrário do Anexo 02, onde é
+# `Total das Despesas Exceto Intra-Orçamentárias` e distingue linhas homônimas.
+COLUNA_REALIZADA = "Até o Bimestre (c)"
+CONTA_RECEITAS_CORRENTES = "RECEITAS CORRENTES"
+
+#: As oito componentes que SOMAM as receitas correntes, e a ordem é a do anexo.
+#:
+#: **A soma fecha exatamente**, medido em 7 municípios de São Paulo (R$ 97,5 bi)
+#: a Itarumã/GO (R$ 56 mi): a maior diferença foi 2,1e-16, que é epsilon de
+#: ponto flutuante e não divergência de dado. Isso dá a esta fonte a mesma
+#: integridade **parte contra todo** que o Anexo 02 oferece — mais forte que a
+#: do RGF, onde só dá para comparar razão contra razão.
+RECEITAS_CORRENTES: tuple[str, ...] = (
+    "IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA",
+    "CONTRIBUIÇÕES",
+    "RECEITA PATRIMONIAL",
+    "RECEITA AGROPECUÁRIA",
+    "RECEITA INDUSTRIAL",
+    "RECEITA DE SERVIÇOS",
+    "TRANSFERÊNCIAS CORRENTES",
+    "OUTRAS RECEITAS CORRENTES",
+)
+
+#: Detalhe guardado e **NÃO somado**: estas linhas estão DENTRO das de cima.
+#:
+#: Somá-las com as outras contaria o mesmo dinheiro duas vezes e quebraria a
+#: régua. Ficam porque "de onde vem a transferência" é a pergunta seguinte
+#: imediata de quem lê que 90% da receita é transferida — Imperatriz recebe
+#: R$ 565 mi da União e R$ 229 mi do Estado, e isso é notícia diferente.
+RECEITAS_DETALHE: tuple[str, ...] = (
+    "Impostos",
+    "Taxas",
+    "Transferências da União e de suas Entidades",
+    "Transferências dos Estados e do Distrito Federal e de suas Entidades",
+)
+
+
+@dataclass(frozen=True)
+class Receita:
+    """A composição da receita corrente, e o total que o próprio anexo declara.
+
+    Responde o que a despesa por função não responde: a página já dizia *para
+    onde vai* o dinheiro e não dizia *de onde vem*. Na sondagem, a mediana da
+    arrecadação própria ficou em **7,3% das receitas correntes** — o município
+    brasileiro típico vive de transferência, e o número que mostra isso não
+    existia em lugar nenhum nesta forma.
+    """
+
+    codigo_ibge: int
+    exercicio: int
+    periodo: int
+    total: float | None
+    valores: dict[str, float]
+
+    @property
+    def soma(self) -> float:
+        """Só as componentes que somam — o detalhe está dentro delas."""
+        return sum(v for c, v in self.valores.items() if c in RECEITAS_CORRENTES)
+
+    @property
+    def fecha(self) -> bool | None:
+        """`None` sem total — ausência de régua não é aprovação."""
+        if self.total is None or not self.valores:
+            return None
+        return abs(self.soma - self.total) <= max(1.0, abs(self.total) * 1e-9)
+
+
+def url_rreo_receita(exercicio: int, periodo: int, codigo_ibge: int) -> str:
+    """RREO Anexo 01 (Balanço Orçamentário) de um ente.
+
+    Bimestral como o Anexo 02, `nr_periodo` de 1 a 6.
+    """
+    if not 1 <= periodo <= 6:
+        raise ValueError(f"bimestre fora de 1..6: {periodo!r}")
+    q = urllib.parse.urlencode({
+        "an_exercicio": exercicio,
+        "nr_periodo": periodo,
+        "co_tipo_demonstrativo": "RREO",
+        "no_anexo": "RREO-Anexo 01",
+        "co_esfera": "M",
+        "id_ente": codigo_ibge,
+    })
+    return f"{BASE}/rreo?{q}"
+
+
+def _receita_de(itens: list[dict], conta: str) -> float | None:
+    for x in itens:
+        if (x.get("coluna") == COLUNA_REALIZADA
+                and (x.get("conta") or "").strip() == conta):
+            return _numero(x.get("valor"))
+    return None
+
+
+def receita(
+    codigo_ibge: int,
+    exercicio: int,
+    periodo: int,
+    transporte: Transporte,
+    *,
+    dormir: Dormir = time.sleep,
+) -> Receita | None:
+    """A composição da receita de um ente, ou `None` se ele não publicou."""
+    d = buscar(
+        url_rreo_receita(exercicio, periodo, codigo_ibge),
+        f"o RREO Anexo 01 de {codigo_ibge} em {exercicio}/{periodo}",
+        transporte,
+        dormir=dormir,
+    )
+    itens = d["items"]
+    if not itens:
+        return None
+    valores = {}
+    for c in RECEITAS_CORRENTES + RECEITAS_DETALHE:
+        v = _receita_de(itens, c)
+        if v is not None:
+            valores[c] = v
+    total = _receita_de(itens, CONTA_RECEITAS_CORRENTES)
+    if total is None and not valores:
+        return None
+    return Receita(codigo_ibge, exercicio, periodo, total, valores)
+
+
 def url_rreo(exercicio: int, periodo: int, codigo_ibge: int) -> str:
     """RREO Anexo 02 (despesa por função) de um ente.
 

@@ -16,7 +16,7 @@ import time
 from . import armazem, siops
 from .siconfi import (
     NORDESTE, PAUSA_PADRAO, Dormir, ErroSiconfi, Transporte,
-    entes, funcoes, pessoal, transporte_http,
+    entes, funcoes, pessoal, receita, transporte_http,
 )
 
 BANCO_PADRAO = os.environ.get("PAINEL_FISCAL_BANCO", "painel.db")
@@ -194,6 +194,63 @@ def cmd_ingerir_funcoes(args, transporte: Transporte, dormir: Dormir) -> int:
             if f:
                 publicaram += 1
                 if f.fecha is False:
+                    nao_fecham += 1
+            if lidos % 50 == 0:
+                print(f"  ... {lidos} lidos, {publicaram} publicaram, "
+                      f"{nao_fecham} não fecham")
+            dormir(args.pausa)
+    except (Exception, KeyboardInterrupt) as e:
+        falha = f"{type(e).__name__}: {e}"
+        print(f"\n>>> interrompida: {falha}", file=sys.stderr)
+        print(f">>> {lidos} municípios gravados; rodar de novo continua daqui.",
+              file=sys.stderr)
+    finally:
+        with armazem.abrir(args.banco) as con:
+            armazem.fechar_coleta(con, coleta, lidos, publicaram, falha)
+    print(f"{lidos} lidos, {publicaram} publicaram, {nao_fecham} com soma que "
+          f"não fecha com o total declarado.")
+    return 1 if falha else 0
+
+
+def cmd_ingerir_receita(args, transporte: Transporte, dormir: Dormir) -> int:
+    """Varre a composição da receita (RREO Anexo 01). Gêmeo do `ingerir-funcoes`.
+
+    Mesmo relatório, mesma escala bimestral e **mesma cobertura** — medido em
+    21/09/2026 com controle: 20 de 20 entre quem publicou o Anexo 02, 0 de 20
+    entre quem não publicou. Quem entregou o RREO entregou os dois anexos.
+
+    Por isso não há surpresa de alcance a esperar aqui: os municípios que já
+    têm despesa por função terão receita, e as duas seções da página casam.
+    """
+    with armazem.abrir(args.banco) as con:
+        alvos = [r[0] for r in con.execute(
+            "SELECT codigo_ibge FROM ente WHERE esfera='M' ORDER BY codigo_ibge")]
+        feitos = set() if args.recomecar else armazem.ja_consultados_receita(
+            con, args.exercicio, args.periodo)
+    if not alvos:
+        print("Nenhum ente no banco. Rode `ingerir-entes` primeiro.", file=sys.stderr)
+        return 2
+
+    pendentes = [c for c in alvos if c not in feitos]
+    print(f"{len(alvos)} municípios; {len(feitos)} já consultados; "
+          f"{len(pendentes)} pendentes em {args.exercicio}/{args.periodo} (bimestre).")
+    if args.limite:
+        pendentes = pendentes[:args.limite]
+        print(f"  limitado a {len(pendentes)} nesta execução.")
+
+    lidos = publicaram = nao_fecham = 0
+    falha: str | None = None
+    with armazem.abrir(args.banco) as con:
+        coleta = armazem.abrir_coleta(con, args.exercicio, args.periodo)
+    try:
+        for codigo in pendentes:
+            r = receita(codigo, args.exercicio, args.periodo, transporte, dormir=dormir)
+            with armazem.abrir(args.banco) as con:
+                armazem.gravar_receita(con, codigo, args.exercicio, args.periodo, r)
+            lidos += 1
+            if r:
+                publicaram += 1
+                if r.fecha is False:
                     nao_fecham += 1
             if lidos % 50 == 0:
                 print(f"  ... {lidos} lidos, {publicaram} publicaram, "
@@ -725,12 +782,14 @@ def montar() -> argparse.ArgumentParser:
     # separados de proposito: um `--periodo 6` no comando errado devolve vazio
     # sem dizer por que, e a mensagem que falta e "voce usou a escala errada".
     for nome, ajuda in (("ingerir-funcoes", "varre a despesa por função (bimestral)"),
+                        ("ingerir-receita", "varre a composição da receita (bimestral)"),
                         ("funcoes", "o que se gasta por função")):
         s = sub.add_parser(nome, help=ajuda)
         s.add_argument("--exercicio", type=int, default=2024)
         s.add_argument("--periodo", type=int, default=6, choices=(1, 2, 3, 4, 5, 6))
-        s.add_argument("--limite", type=int, default=0 if nome == "ingerir-funcoes" else 12)
-        if nome == "ingerir-funcoes":
+        s.add_argument("--limite", type=int,
+                       default=0 if nome.startswith("ingerir") else 12)
+        if nome.startswith("ingerir"):
             s.add_argument("--pausa", type=float, default=PAUSA_PADRAO)
             s.add_argument("--recomecar", action="store_true")
 
@@ -783,6 +842,7 @@ def principal(argv=None, transporte: Transporte | None = None,
           "resumo": cmd_resumo, "listar": cmd_listar,
           "conferir": cmd_conferir, "exportar": cmd_exportar,
           "ingerir-funcoes": cmd_ingerir_funcoes, "funcoes": cmd_funcoes,
+          "ingerir-receita": cmd_ingerir_receita,
           "ingerir-saude": cmd_ingerir_saude, "saude": cmd_saude}[args.comando]
     try:
         return fn(args, t, dormir)
