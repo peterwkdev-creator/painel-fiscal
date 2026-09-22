@@ -242,12 +242,49 @@ def fechar_coleta(con: sqlite3.Connection, rowid: int, lidos: int,
         (agora(), lidos, publicaram, falhou_com, rowid))
 
 
+#: Tabelas cuja fatia por ente é substituída inteira a cada releitura.
+TABELAS_POR_FATIA = ("despesa_funcao", "receita")
+
+
+def _apagar_fatia(con: sqlite3.Connection, tabela: str, codigo_ibge: int,
+                  exercicio: int, periodo: int) -> int:
+    """Apaga a fatia do ente antes de regravá-la. **Releitura substitui.**
+
+    Achado em 21/09/2026, ao consertar o leitor da receita. As duas gravações
+    eram UPSERT puro, e UPSERT **nunca apaga**: uma linha que o leitor corrigido
+    deixou de produzir sobreviveria à releitura.
+
+    O caso concreto era Mata Grande/AL, com um `RECEITA DE SERVIÇOS` importado
+    do bloco intra-orçamentário. Releitura com o leitor certo não produz aquela
+    linha -- e, sem este apagamento, ela ficaria no banco enquanto o
+    `receita_consulta.fecha` passava a **1**. Trava verde, dado sujo: a forma
+    exata do defeito que este projeto já pagou três vezes.
+
+    **É também por isso que o apagamento vem ANTES do `if not r: return`**: um
+    ente que publicou e deixou de publicar tem de ficar sem linha nenhuma,
+    senão `publicou=0` conviveria com valores gravados.
+
+    O preço, dito de propósito: se a fonte devolver vazio por instabilidade, a
+    fatia daquele ente se perde até a próxima varredura. É o lado certo do
+    prejuízo -- fatia faltando se recoleta e se enxerga na contagem; fatia
+    fantasma não se enxerga de jeito nenhum.
+    """
+    if tabela not in TABELAS_POR_FATIA:  # nunca interpolar nome vindo de fora
+        raise ValueError(f"tabela fora do contrato de fatia: {tabela!r}")
+    cur = con.execute(
+        f"DELETE FROM {tabela} WHERE codigo_ibge=? AND exercicio=? AND periodo=?",
+        (codigo_ibge, exercicio, periodo))
+    return cur.rowcount
+
+
 def gravar_funcoes(con: sqlite3.Connection, codigo_ibge: int, exercicio: int,
                    periodo: int, f) -> None:
     """Grava a despesa por função -- e grava também quando não houve nenhuma.
 
     `f is None` significa "consultado, não publicou". Sem registrar isso, a
     retomada perguntaria de novo a cada execução a todo município sem relatório.
+
+    **Substitui a fatia do ente, não faz merge** -- ver `_apagar_fatia`.
     """
     agora_ = agora()
     con.execute(
@@ -258,14 +295,12 @@ def gravar_funcoes(con: sqlite3.Connection, codigo_ibge: int, exercicio: int,
         "   coletado_em=excluded.coletado_em",
         (codigo_ibge, exercicio, periodo, 1 if f else 0,
          None if (f is None or f.fecha is None) else int(f.fecha), agora_))
+    _apagar_fatia(con, "despesa_funcao", codigo_ibge, exercicio, periodo)
     if not f:
         return
     con.executemany(
         "INSERT INTO despesa_funcao (codigo_ibge, exercicio, periodo, funcao,"
-        " valor, total_declarado, fonte, coletado_em) VALUES (?,?,?,?,?,?,?,?)"
-        " ON CONFLICT(codigo_ibge, exercicio, periodo, funcao) DO UPDATE SET"
-        "   valor=excluded.valor, total_declarado=excluded.total_declarado,"
-        "   fonte=excluded.fonte, coletado_em=excluded.coletado_em",
+        " valor, total_declarado, fonte, coletado_em) VALUES (?,?,?,?,?,?,?,?)",
         [(codigo_ibge, exercicio, periodo, nome, valor, f.total,
           FONTE_FUNCOES, agora_) for nome, valor in f.valores.items()])
 
@@ -281,6 +316,8 @@ def gravar_receita(con: sqlite3.Connection, codigo_ibge: int, exercicio: int,
 
     `r is None` significa "consultado, não publicou" -- sem registrar isso, a
     retomada perguntaria de novo a cada execução a todo município sem relatório.
+
+    **Substitui a fatia do ente, não faz merge** -- ver `_apagar_fatia`.
     """
     agora_ = agora()
     con.execute(
@@ -291,14 +328,12 @@ def gravar_receita(con: sqlite3.Connection, codigo_ibge: int, exercicio: int,
         "   coletado_em=excluded.coletado_em",
         (codigo_ibge, exercicio, periodo, 1 if r else 0,
          None if (r is None or r.fecha is None) else int(r.fecha), agora_))
+    _apagar_fatia(con, "receita", codigo_ibge, exercicio, periodo)
     if not r:
         return
     con.executemany(
         "INSERT INTO receita (codigo_ibge, exercicio, periodo, conta,"
-        " valor, total_declarado, fonte, coletado_em) VALUES (?,?,?,?,?,?,?,?)"
-        " ON CONFLICT(codigo_ibge, exercicio, periodo, conta) DO UPDATE SET"
-        "   valor=excluded.valor, total_declarado=excluded.total_declarado,"
-        "   fonte=excluded.fonte, coletado_em=excluded.coletado_em",
+        " valor, total_declarado, fonte, coletado_em) VALUES (?,?,?,?,?,?,?,?)",
         [(codigo_ibge, exercicio, periodo, conta, valor, r.total,
           FONTE_RECEITA, agora_) for conta, valor in r.valores.items()])
 

@@ -377,25 +377,54 @@ class Funcoes:
 # O `rotulo` é sempre `Padrão` neste anexo — ao contrário do Anexo 02, onde é
 # `Total das Despesas Exceto Intra-Orçamentárias` e distingue linhas homônimas.
 COLUNA_REALIZADA = "Até o Bimestre (c)"
-CONTA_RECEITAS_CORRENTES = "RECEITAS CORRENTES"
 
-#: As oito componentes que SOMAM as receitas correntes, e a ordem é a do anexo.
+# ⚠ O `conta` NÃO identifica a linha. O `cod_conta` identifica.
+#
+# Medido em 21/09/2026, depois de a varredura das 5.570 acusar 15 entes cuja
+# soma passava do total. Há **dois pares de homônimos** dentro da MESMA
+# resposta, e eles não se parecem em gravidade:
+#
+#     ReceitasCorrentes                               RECEITAS CORRENTES
+#     ReceitasCorrentesIntra                          RECEITAS CORRENTES
+#
+#     TransferenciasCorrentesDaUniaoEDeSuasEntidades  Transferências da União…
+#     TransferenciasDeCapitalDaUniaoEDeSuasEntidades  Transferências da União…
+#
+# O primeiro é o bloco **INTRA-ORÇAMENTÁRIAS (II)**, que repete os nomes do
+# bloco (I) e aparece em 0,5% dos entes. A régua de fechamento o denuncia — a
+# soma passa do total —, e foi ela quem o achou.
+#
+# **O segundo aparece em TODOS os entes**, Imperatriz incluída — a fixture que
+# passou nos dezesseis primeiros testes desta fonte. E a régua **não o vê**,
+# porque o detalhe não entra na soma: uma transferência de CAPITAL entraria no
+# lugar de uma corrente, o número ficaria bem formado e a conta fecharia.
+# Ler pelo nome acertava por ordem de resposta, não por identificação.
+#
+# Conferido no corpo inteiro depois do conserto: em nenhum dos 3.243 entes o
+# detalhe passa do pai. A ordem havia segurado — mas segurança por ordem não é
+# a mesma coisa que ler a linha certa.
+COD_TOTAL = "ReceitasCorrentes"
+
+#: `cod_conta` → nome guardado, das oito componentes que SOMAM as correntes.
+#: A ordem é a do anexo. Os doze códigos foram lidos das respostas reais, nunca
+#: derivados do nome: `RECEITA AGROPECUÁRIA` e `RECEITA INDUSTRIAL` existem em
+#: 116 e 17 entes, e nenhuma das duas fixtures as tinha.
 #:
 #: **A soma fecha exatamente**, medido em 7 municípios de São Paulo (R$ 97,5 bi)
 #: a Itarumã/GO (R$ 56 mi): a maior diferença foi 2,1e-16, que é epsilon de
 #: ponto flutuante e não divergência de dado. Isso dá a esta fonte a mesma
 #: integridade **parte contra todo** que o Anexo 02 oferece — mais forte que a
 #: do RGF, onde só dá para comparar razão contra razão.
-RECEITAS_CORRENTES: tuple[str, ...] = (
-    "IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA",
-    "CONTRIBUIÇÕES",
-    "RECEITA PATRIMONIAL",
-    "RECEITA AGROPECUÁRIA",
-    "RECEITA INDUSTRIAL",
-    "RECEITA DE SERVIÇOS",
-    "TRANSFERÊNCIAS CORRENTES",
-    "OUTRAS RECEITAS CORRENTES",
-)
+COD_RECEITAS_CORRENTES: dict[str, str] = {
+    "ReceitaTributaria": "IMPOSTOS, TAXAS E CONTRIBUIÇÕES DE MELHORIA",
+    "ReceitaDeContribuicoes": "CONTRIBUIÇÕES",
+    "ReceitaPatrimonial": "RECEITA PATRIMONIAL",
+    "ReceitaAgropecuaria": "RECEITA AGROPECUÁRIA",
+    "ReceitaIndustrial": "RECEITA INDUSTRIAL",
+    "ReceitaDeServicos": "RECEITA DE SERVIÇOS",
+    "TransferenciasCorrentes": "TRANSFERÊNCIAS CORRENTES",
+    "OutrasReceitasCorrentes": "OUTRAS RECEITAS CORRENTES",
+}
 
 #: Detalhe guardado e **NÃO somado**: estas linhas estão DENTRO das de cima.
 #:
@@ -403,12 +432,21 @@ RECEITAS_CORRENTES: tuple[str, ...] = (
 #: régua. Ficam porque "de onde vem a transferência" é a pergunta seguinte
 #: imediata de quem lê que 90% da receita é transferida — Imperatriz recebe
 #: R$ 565 mi da União e R$ 229 mi do Estado, e isso é notícia diferente.
-RECEITAS_DETALHE: tuple[str, ...] = (
-    "Impostos",
-    "Taxas",
-    "Transferências da União e de suas Entidades",
-    "Transferências dos Estados e do Distrito Federal e de suas Entidades",
-)
+#:
+#: É aqui que mora o homônimo invisível: os dois `Transferencias*DaUniao*` têm
+#: nome idêntico e só o código os separa.
+COD_RECEITAS_DETALHE: dict[str, str] = {
+    "Impostos": "Impostos",
+    "Taxas": "Taxas",
+    "TransferenciasCorrentesDaUniaoEDeSuasEntidades":
+        "Transferências da União e de suas Entidades",
+    "TransferenciasCorrentesDosEstadosEDoDistritoFederalEDeSuasEntidades":
+        "Transferências dos Estados e do Distrito Federal e de suas Entidades",
+}
+
+#: Os nomes, na ordem — é por eles que o banco e a página falam.
+RECEITAS_CORRENTES: tuple[str, ...] = tuple(COD_RECEITAS_CORRENTES.values())
+RECEITAS_DETALHE: tuple[str, ...] = tuple(COD_RECEITAS_DETALHE.values())
 
 
 @dataclass(frozen=True)
@@ -459,10 +497,15 @@ def url_rreo_receita(exercicio: int, periodo: int, codigo_ibge: int) -> str:
     return f"{BASE}/rreo?{q}"
 
 
-def _receita_de(itens: list[dict], conta: str) -> float | None:
+def _receita_de(itens: list[dict], cod: str) -> float | None:
+    """A linha realizada de um `cod_conta` — ver o aviso sobre homônimos.
+
+    Casar por `conta` devolvia a primeira ocorrência do NOME, que em duas
+    situações é outra linha: o bloco intra-orçamentário e a transferência de
+    capital. Aqui não há primeira ocorrência a escolher: o código é único.
+    """
     for x in itens:
-        if (x.get("coluna") == COLUNA_REALIZADA
-                and (x.get("conta") or "").strip() == conta):
+        if x.get("coluna") == COLUNA_REALIZADA and x.get("cod_conta") == cod:
             return _numero(x.get("valor"))
     return None
 
@@ -486,11 +529,12 @@ def receita(
     if not itens:
         return None
     valores = {}
-    for c in RECEITAS_CORRENTES + RECEITAS_DETALHE:
-        v = _receita_de(itens, c)
+    for cod, nome in (*COD_RECEITAS_CORRENTES.items(),
+                      *COD_RECEITAS_DETALHE.items()):
+        v = _receita_de(itens, cod)
         if v is not None:
-            valores[c] = v
-    total = _receita_de(itens, CONTA_RECEITAS_CORRENTES)
+            valores[nome] = v
+    total = _receita_de(itens, COD_TOTAL)
     if total is None and not valores:
         return None
     return Receita(codigo_ibge, exercicio, periodo, total, valores)

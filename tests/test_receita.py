@@ -14,6 +14,9 @@ import unittest
 from pathlib import Path
 
 from fiscal.siconfi import (
+    COD_RECEITAS_CORRENTES,
+    COD_RECEITAS_DETALHE,
+    COD_TOTAL,
     COLUNA_REALIZADA,
     RECEITAS_CORRENTES,
     RECEITAS_DETALHE,
@@ -25,6 +28,8 @@ from fiscal.siconfi import (
 
 FIX = Path(__file__).parent / "fixtures"
 CORPUS = json.loads((FIX / "rreo_a01_imperatriz.json").read_text(encoding="utf-8"))
+CORPUS_INTRA = json.loads(
+    (FIX / "rreo_a01_mata_grande.json").read_text(encoding="utf-8"))
 
 
 def transporte_fixo(corpo: dict):
@@ -157,6 +162,143 @@ class TestAusenciaEBorda(unittest.TestCase):
         u = url_rreo_receita(2024, 6, 2105302)
         self.assertIn("RREO-Anexo+01", u)
         self.assertIn("nr_periodo=6", u)
+
+
+class TestOHomonimoQueARegraDeFechamentoNAOVE(unittest.TestCase):
+    """A armadilha mais silenciosa das três, e ela está em Imperatriz.
+
+    `Transferências da União e de suas Entidades` é o nome de **duas** linhas
+    da mesma resposta — uma dentro de TRANSFERÊNCIAS CORRENTES, outra dentro de
+    RECEITAS DE CAPITAL. Só o `cod_conta` as separa:
+
+        TransferenciasCorrentesDaUniaoEDeSuasEntidades   565.546.785,73
+        TransferenciasDeCapitalDaUniaoEDeSuasEntidades     3.563.690,42
+
+    **Isto existe em todos os entes**, e não só nos 0,5% com bloco intra. E a
+    régua de fechamento não o alcança, porque o detalhe não entra na soma:
+    importar o número de capital daria um valor bem formado, uma conta que
+    fecha e uma frase errada na página.
+
+    Os dezesseis primeiros testes desta fonte passaram sobre esta fixture sem
+    ver isso — o leitor pegava a primeira ocorrência do nome, e a ordem da
+    resposta o salvava. *Acertar por ordem não é identificar a linha.*
+
+    **Declarado de propósito: estes quatro testes NÃO reprovam o leitor
+    antigo** — ele acertava aqui, por sorte de ordenação. São guarda de
+    regressão, não canário. Quem reprova o leitor antigo é
+    `test_o_leitor_casa_por_cod_conta`, logo abaixo, e os dois testes do bloco
+    intra. Confundir as duas coisas é confiar numa medição que não mede.
+    """
+
+    def test_le_a_transferencia_CORRENTE(self):
+        self.assertEqual(
+            ler().valores["Transferências da União e de suas Entidades"],
+            CORPUS["_transf_uniao"])
+
+    def test_e_NAO_a_de_capital(self):
+        self.assertNotEqual(
+            ler().valores["Transferências da União e de suas Entidades"],
+            CORPUS["_transf_uniao_DE_CAPITAL"])
+
+    def test_as_duas_linhas_existem_MESMO_na_fixture_que_passou(self):
+        # Para o teste acima não passar por acaso: se um dia a fixture perder a
+        # linha de capital, ele deixa de provar o que diz provar.
+        homonimas = [x for x in CORPUS["resposta"]["items"]
+                     if x["coluna"] == COLUNA_REALIZADA
+                     and x["conta"].strip()
+                     == "Transferências da União e de suas Entidades"]
+        self.assertEqual(len(homonimas), 2)
+        self.assertEqual({x["cod_conta"] for x in homonimas},
+                         {"TransferenciasCorrentesDaUniaoEDeSuasEntidades",
+                          "TransferenciasDeCapitalDaUniaoEDeSuasEntidades"})
+
+    def test_a_regua_de_fechamento_e_CEGA_a_este_defeito(self):
+        # O que justifica um teste próprio: trocar o detalhe pelo número errado
+        # mantém `fecha` em True. Nenhuma verificação de integridade acusaria.
+        r = ler()
+        trocado = dict(r.valores)
+        trocado["Transferências da União e de suas Entidades"] = \
+            CORPUS["_transf_uniao_DE_CAPITAL"]
+        errado = Receita(r.codigo_ibge, r.exercicio, r.periodo, r.total,
+                         trocado)
+        self.assertIs(errado.fecha, True)
+
+
+class TestOCodigoEOquediscrimina(unittest.TestCase):
+    """Fecha a porta do nome, para ninguém reabri-la por engano."""
+
+    def test_o_leitor_casa_por_cod_conta(self):
+        # Um item com o `conta` certo e `cod_conta` de outra linha não pode ser
+        # lido — é exatamente a forma dos dois defeitos de 21/09/2026.
+        disfarce = {"items": [{
+            "coluna": COLUNA_REALIZADA,
+            "cod_conta": "ReceitasCorrentesIntra",
+            "conta": "RECEITAS CORRENTES",
+            "valor": 999.0,
+        }]}
+        r = receita(1, 2024, 6, transporte_fixo(disfarce),
+                    dormir=lambda _: None)
+        self.assertIsNone(r)
+
+    def test_nenhum_codigo_se_repete_entre_as_duas_tabelas(self):
+        self.assertFalse(set(COD_RECEITAS_CORRENTES) & set(COD_RECEITAS_DETALHE))
+        self.assertNotIn(COD_TOTAL, COD_RECEITAS_CORRENTES)
+
+    def test_os_nomes_publicos_saem_das_tabelas(self):
+        # `RECEITAS_CORRENTES` é o que o banco e a página falam; ele não pode
+        # divergir da tabela de códigos que o leitor usa.
+        self.assertEqual(RECEITAS_CORRENTES, tuple(COD_RECEITAS_CORRENTES.values()))
+        self.assertEqual(RECEITAS_DETALHE, tuple(COD_RECEITAS_DETALHE.values()))
+
+
+class TestOBlocoIntraOrcamentarioNaoPodeVazar(unittest.TestCase):
+    """A terceira armadilha, achada pela varredura real em 21/09/2026.
+
+    O anexo tem DOIS blocos com os mesmos nomes de conta:
+
+        RECEITAS (EXCETO INTRA-ORÇAMENTÁRIAS) (I)   <- o que se quer
+          RECEITAS CORRENTES, IMPOSTOS..., TRANSFERÊNCIAS...
+        RECEITAS (INTRA-ORÇAMENTÁRIAS) (II)         <- a fronteira
+          RECEITAS CORRENTES, ... de novo
+
+    **E aqui o `rotulo` NÃO separa os dois** — é `Padrão` em ambos, ao
+    contrário do Anexo 02, onde `Total das Despesas Exceto Intra-Orçamentárias`
+    faz esse trabalho. O que separa é a POSIÇÃO: tudo depois do marcador
+    `ReceitasIntraOrcamentariasTotal` pertence ao segundo bloco.
+
+    Mata Grande/AL **não tem** RECEITA DE SERVIÇOS no primeiro bloco e tem
+    R$ 9.698.837,21 no segundo. Um leitor que varra a resposta inteira importa
+    aquele número, e a soma passa do total em 6,1%.
+
+    A sondagem não pegou porque os 7 municípios medidos não tinham bloco intra
+    — *amostra de sete não cobre uma estrutura que aparece em 0,5% dos casos*.
+    Quem pegou foi a régua de fechamento, na varredura das 5.570.
+    """
+
+    def ler_intra(self):
+        return receita(2705002, 2024, 6,
+                       transporte_fixo(CORPUS_INTRA["resposta"]),
+                       dormir=lambda _: None)
+
+    def test_o_total_e_o_do_bloco_EXCETO_intra(self):
+        r = self.ler_intra()
+        self.assertEqual(r.total,
+                         CORPUS_INTRA["_receitas_correntes_exceto_intra"])
+
+    def test_e_NAO_o_do_bloco_intra(self):
+        r = self.ler_intra()
+        self.assertNotEqual(r.total, CORPUS_INTRA["_receitas_correntes_INTRA"])
+
+    def test_componente_que_SO_existe_no_intra_nao_e_lida(self):
+        # É o caso exato: sem RECEITA DE SERVIÇOS no primeiro bloco, o valor
+        # do segundo não pode aparecer.
+        r = self.ler_intra()
+        self.assertNotIn("RECEITA DE SERVIÇOS", r.valores)
+
+    def test_e_por_isso_a_soma_FECHA(self):
+        # A prova de que a correção é a certa: com o bloco intra fora, a
+        # régua da própria fonte aprova.
+        self.assertIs(self.ler_intra().fecha, True)
 
 
 if __name__ == "__main__":
