@@ -91,7 +91,7 @@ exists, for searching and sorting the rows.
 python -m unittest discover -s tests -t .
 ```
 
-**107 tests, no network and no real waiting** — the HTTP transport and the clock
+**No network and no real waiting** — the HTTP transport and the clock
 are both injected, and the suite prints nothing: a real
 `ATENÇÃO: incomplete database` has to be distinguishable from the same warning
 coming out of a 20-municipality fixture. The fixtures are responses **captured
