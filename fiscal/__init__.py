@@ -1,1 +1,1 @@
-"""Painel Fiscal do Nordeste."""
+"""Painel Fiscal."""

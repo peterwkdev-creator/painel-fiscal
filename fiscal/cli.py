@@ -1049,7 +1049,7 @@ def cmd_exportar(args, *_) -> int:
 
 
 def montar() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="fiscal", description="Painel Fiscal do Nordeste")
+    p = argparse.ArgumentParser(prog="fiscal", description="Painel Fiscal: o RGF dos municípios no SICONFI")
     p.add_argument("--banco", default=BANCO_PADRAO)
     sub = p.add_subparsers(dest="comando", required=True)
 

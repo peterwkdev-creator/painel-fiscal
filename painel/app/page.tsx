@@ -34,7 +34,7 @@ export default async function Pagina() {
   return (
     <main className={estilos.pagina} id="conteudo">
       <header className={estilos.cabecalho}>
-        <h1 className={estilos.titulo}>Painel Fiscal do Nordeste</h1>
+        <h1 className={estilos.titulo}>Painel Fiscal</h1>
         <p className={estilos.subtitulo}>
           Quanto cada município gasta com pessoal, contra o limite que a{" "}
           <strong>Lei de Responsabilidade Fiscal</strong> impõe a ele.
