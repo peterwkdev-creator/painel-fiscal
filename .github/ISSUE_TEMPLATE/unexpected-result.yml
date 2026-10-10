@@ -1,0 +1,36 @@
+name: Figure differs from the source
+description: A figure differs from SICONFI or SIOPS, or from your own count, or a municipality is missing.
+title: "Figure differs: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not post anyone's personal data (taxpayer IDs, addresses, contacts).
+        Figures are read from the official source as published: this is not an audit of any municipality's accounts.
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: "Output of `git rev-parse --short HEAD`."
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: What you ran
+      description: The command, the municipality (IBGE code) and the period.
+    validations:
+      required: true
+  - type: textarea
+    id: got
+    attributes:
+      label: What it returned
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and where it comes from
+      description: The official source's address, the report and period, or your own count.
+    validations:
+      required: true
