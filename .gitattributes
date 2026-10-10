@@ -1,0 +1,2 @@
+# The hook runs under sh: CRLF (core.autocrlf=true on Git for Windows) breaks it.
+.githooks/* text eol=lf

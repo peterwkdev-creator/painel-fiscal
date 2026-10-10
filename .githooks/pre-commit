@@ -1,0 +1,15 @@
+#!/bin/sh
+# Pre-commit hook (no CI here): blocks only integrity, i.e. the tests and the
+# shared secret checker of the maintainer's workspace, found by relative path.
+# Enable in a clone:
+#   git config core.hooksPath .githooks
+# Skip only with a stated reason: git commit --no-verify
+set -e
+cd "$(git rev-parse --show-toplevel)"
+python -m unittest discover -s tests -q
+segredo=../../../Coordenacao/ferramentas/conferir-segredo.py
+if [ ! -f "$segredo" ]; then
+    echo "pre-commit: $segredo not found (outside the maintainer's workspace, disable the hook)" >&2
+    exit 1
+fi
+python "$segredo" .
