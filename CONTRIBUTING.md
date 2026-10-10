@@ -10,8 +10,7 @@ code:
   python -m unittest discover -s tests -t .
   ```
 
-- The Python engine uses the standard library only: no dependencies (the
-  `painel/` dashboard is a separate Node app).
+- The Python engine uses the standard library only: no dependencies.
 - Every figure is read from the official source (SICONFI, SIOPS) as
   published, never recomputed, with the collection date. Absence is
   recorded as absence, never as zero.

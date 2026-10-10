@@ -1,10 +1,9 @@
 /**
- * Tipos e helpers do snapshot. **Módulo puro** — nada de `node:fs` aqui.
+ * Tipos e helpers do snapshot: a forma declarada do que o `exportar` produz.
  *
- * A leitura de disco mora em `lib/servidor.ts`. A separação não é estética: no
- * projeto irmão, misturar as duas coisas quebrou o build com
- * `UnhandledSchemeError: node:path`, porque este módulo é importado também pelo
- * componente de cliente, e `node:fs` não pode ir para o navegador.
+ * O painel Next.js que importava este módulo saiu em 10/10/2026 (nada o rodava,
+ * e as dependências dele tinham alerta de segurança). Quem publica o snapshot é
+ * o site `numeros-publicos`; este arquivo fica como o contrato.
  *
  * As chaves declaradas aqui são cobradas por um teste do lado Python
  * (`tests/test_snapshot.py`): se o export e estes tipos se afastarem, o teste

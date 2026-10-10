@@ -76,14 +76,14 @@ series.
 
 ## The panel
 
-```bash
-cd painel && npm install && npm run build && npx serve out
-```
-
-A Next.js static export: the page is generated at build time from the snapshot
-on disk, so the visitor downloads HTML with the numbers already in it. No
-backend, no database in production, no loading state. One client component
-exists, for searching and sorting the rows.
+The figures are published at
+[numerospublicos.com.br](https://www.numerospublicos.com.br), built by
+[numeros-publicos](https://github.com/peterwkdev-creator/numeros-publicos) from
+`painel/dados/snapshot.json`. The standalone Next.js panel that used to live in
+`painel/` was removed on 2026-10-10: nothing ran it any more, and its
+dependencies carried security advisories. `painel/lib/dados.ts` stays as the
+declared shape of the snapshot, which `tests/test_snapshot.py` checks the
+export against.
 
 ## Test it
 
